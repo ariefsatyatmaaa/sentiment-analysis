@@ -1,0 +1,227 @@
+---
+title: "twitter"
+author: "arief"
+date: "1/20/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+##global
+1. Mencantumkan library yang digunakan
+2. Mengautentikasi API Twitter
+
+```{r glb}
+library(shiny)
+library(shinydashboard)
+library(twitteR)
+library(stringr)
+library(sentimentr)
+library(dplyr)
+library(caret)
+library(tm)
+library(naivebayes)
+library(wordcloud)
+library(plotrix)
+
+#Memasukan API Key Twitter yang telah didapat dari website developer.twitter
+authenticateAPI <- function() {
+  consumer.api_key <- "mkRIbGhNwk5zFzCPdYePqTYJz"
+  consumer.api_secret_key <- "TAdq3bs4t8x87zjYzMvbQg0BLLQlHy9GXNVsT4W462WTddtlpx"
+  access.token <- "395883697-bh9HWXD2ZK2YHZnLaET9vpqH16Fun5f5PElnaGgl"
+  access.token_secret <- "4LDDK7fpM3lrWFkplc7xjgPBjVjuzY9CMYOn8yPfvQ2kR"
+
+  setup_twitter_oauth(consumer.api_key, consumer.api_secret_key, access.token, access.token_secret)
+}
+
+authenticateAPI()
+```
+
+##ui
+
+```{r ui}
+ui <- dashboardPage(
+  
+  dashboardHeader(title = "Sentimen Analysis", titleWidth = 300
+  ),
+  
+  dashboardSidebar(
+    width = 300,
+    textInput(
+      "searchTweet",
+      "Masukkan topic yang dicari",
+      "maldives",
+    ),
+     sliderInput("maxTweet",
+                  "Jumlah tweet yang akan dianalisis",
+                  min = 100,
+                  max = 500,
+                  value = 100
+                 ),
+    fluidPage(
+      submitButton(text="Analysis Now!")
+    )
+  ),
+  dashboardBody(
+    fluidRow(
+      box(
+        title = "Sentimen Tweets",
+        solidHeader = T,
+        width = 12,
+        collapsible = T,
+        tableOutput("tableSentiment")
+      ),
+    ),
+      fluidRow(
+      box(title = "Wordcloud",
+          solidHeader = T,
+          width = 12,
+          collapsible = T,
+          plotOutput("wordCount")
+      ),
+    ),
+      fluidRow(
+      box(title = "Percentage",
+          textOutput("positive"),
+          textOutput("negative"),
+          solidHeader = T,
+          width = 12,
+          collapsible = T,
+          plotOutput("piePlot"),
+      ),
+    ),
+  )
+)
+```
+
+##server
+
+```{r server}
+server <- function(input, output) {
+  
+sentiment.final <- reactive({
+    # Scrapping tweet menggunakan packages twitteR
+    print(input$searchTweet)
+    print(input$maxTweet)
+    tweet.results <- searchTwitter(input$searchTweet, n = input$maxTweet, lang = "en")
+    
+    #menyimpan data tweet dalam bentuk txt
+    some_txt <- sapply(tweet.results, function(x) x$getText()) 
+    write.table(some_txt, file='E:/Kuliah/Praktikum DS/Project 1/data/data.txt')
+    
+    # Mengubah hasil pencarian menjadi data frame
+    tweet.df <- twListToDF(tweet.results)
+    tweet.df <- data.frame(tweet.df['text'])
+    
+    # Membersihkan character yang tidak diperlukan
+    tweet.df$text = str_replace_all(tweet.df$text, "[\\.\\,\\;]+", " ")
+    tweet.df$text = str_replace_all(tweet.df$text, "http\\w+", "")
+    tweet.df$text = str_replace_all(tweet.df$text, "@\\w+", " ")
+    tweet.df$text = str_replace_all(tweet.df$text, "[[:punct:]]", " ")
+    tweet.df$text = str_replace_all(tweet.df$text, "[[:digit:]]", " ")
+    tweet.df$text = str_replace_all(tweet.df$text, "^ ", " ")
+    tweet.df$text = str_replace_all(tweet.df$text, "[<].*[>]", " ")
+    
+    #Menghitung nilai skor dari tweet yang telah diambil menggunakan packages sentimentr
+    sentiment.score <- sentiment(tweet.df$text)
+    sentiment.score <- sentiment.score %>% group_by(element_id) %>% summarise(sentiment = mean(sentiment))
+    
+    #Membuat variable baru dengan memberikan nilai polaritas dari hasil sentiment tadi
+    tweet.df$polarity <- sentiment.score$sentiment
+    tweet.final <- tweet.df[, c('text', 'polarity')]
+    
+    #Memberikan rating positive atau negatif berdasarkan polaritas tadi
+    tweet.final <- tweet.final[tweet.final$polarity != 0, ]
+    tweet.final$sentiment <- ifelse(tweet.final$polarity < 0, "Negative", "Positive")
+    tweet.final$sentiment <- as.factor(tweet.final$sentiment)
+    
+    #Menambahkan id pada setiap baris sentimen
+    tweet.final$id <- seq(1, nrow(tweet.final))
+    
+    # Document Term Matrix
+    get.dtm <- function(text.col, id.col, input.df, weighting) {
+   
+      # removing emoticon
+    input.df$text <- gsub("[^\x01-\x7F]", "", input.df$text)
+   
+      # preprocessing text
+    corpus <- VCorpus(DataframeSource(input.df))
+    corpus <- tm_map(corpus, removePunctuation)
+    corpus <- tm_map(corpus, removeNumbers)
+    corpus <- tm_map(corpus, stripWhitespace)
+    corpus <- tm_map(corpus, removeWords, stopwords("english"))
+    corpus <- tm_map(corpus, content_transformer(tolower))
+    
+    #Mengembalikan 2 buah nilai term dan corpus(text yang sudah dibersihkan)
+    dtm <- DocumentTermMatrix(corpus, control = list(weighting = weighting))
+    return(list(
+        "termMatrix" = dtm,
+        "corpus" = corpus
+      ))
+    }
+    
+    #Menentukan fitur seleksi
+    colnames(tweet.final)[4] <- "doc_id"
+    dtm <- get.dtm('text', 'id', tweet.final, "weightTfIdf")
+    corpus <- dtm$corpus
+    dtm <- dtm$termMatrix
+    dtm.mat <- as.matrix(dtm)
+    
+    # Using Naive Bayes
+    model <- naive_bayes(x = dtm.mat, y = tweet.final$sentiment, usekernel = TRUE)
+    
+    # predict using model
+    preds <- predict(model, newdata = dtm.mat, type = "class")
+    return(list(
+      "tweet_final" = tweet.final,
+      "prior" = model$prior,
+      "word" = corpus
+    ))
+  })
+  
+#output 
+x <- reactive({
+    x <- c(sentiment.final()$prior[['Negative']], sentiment.final()$prior[['Positive']])
+  })
+#output pie diagram
+  labels <- c("Negative", "Positive")
+  output$piePlot <- renderPlot({
+    pie3D(x(), labels = labels, explode = 0.1, main = "Perbandingan Sentiment dalam Bentuk Pie")
+  })
+  #output text pada diagram
+  output$negative <- renderText(
+    paste("Negative : ", 
+          toString(floor(sentiment.final()$prior[['Negative']] * 100)), "%", sep = "")
+  )
+  #output text pada diagram
+  output$positive <- renderText(
+    paste("Positive : ", 
+          toString(floor(sentiment.final()$prior[['Positive']] * 100)),  "%", sep = "")
+  )
+  #output wordcloud
+  output$wordCount <- renderPlot({
+    wordcloud(
+      sentiment.final()$word,
+      random.offer = 'F',
+      max.words = 1000,
+      col = rainbow(1000),
+      main="wordCount",
+    )
+  })
+  #output sentimen tweet
+  sentimentPerTweet <- reactive({
+    sentimentPerTweet <- sentiment.final()$tweet_final %>% select('text', 'sentiment')
+  })
+  
+  output$tableSentiment <- renderTable(
+    sentimentPerTweet()
+  )
+}
+```
+
+##run shiny
+```{r run}
+shinyApp(ui = ui, server = server)
+```
