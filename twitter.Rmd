@@ -109,7 +109,7 @@ sentiment.final <- reactive({
     
     #menyimpan data tweet dalam bentuk txt
     some_txt <- sapply(tweet.results, function(x) x$getText()) 
-    write.table(some_txt, file='E:/Kuliah/Praktikum DS/Project 1/data/data.txt')
+    write.table(some_txt, file='data/data.txt')
     
     # Mengubah hasil pencarian menjadi data frame
     tweet.df <- twListToDF(tweet.results)
